@@ -97,7 +97,6 @@ def settings(g):
     rows = [
         [B(text=f"💬 Muhokama: {s['discuss']} s", callback_data=f"sg:{g.id}:discuss")],
         [B(text=f"🃏 Kartani tanlash: {s['reveal']} s", callback_data=f"sg:{g.id}:reveal")],
-        [B(text=f"🎤 Gapirish navbati: {s.get('speak', 30)} s", callback_data=f"sg:{g.id}:speak")],
         [B(text="🗳 Ovoz: " + ("Yashirin" if s["secret"] else "Ochiq"), callback_data=f"sg:{g.id}:secret")],
         [B(text="✨ Maxsus kartalar: " + ("Yoqilgan" if s["specials"] else "O'chirilgan"), callback_data=f"sg:{g.id}:specials")],
         [B(text="⚡ Tezkor rejim: " + ("Yoqilgan" if s["fast"] else "O'chirilgan"), callback_data=f"sg:{g.id}:fast")],
@@ -409,19 +408,28 @@ def turn_choose(g, p, mention):
     return "\n".join(lines)
 
 
-def turn_choose_kb(g, p):
+def turn_choose_kb(g, p, reveal=True):
+    """reveal=True — tugmada kartaning matni ham ko'rinadi (faqat egasiga)."""
     from game import allowed_types
     allowed = allowed_types(g, p)
-    if len(allowed) == 1:
-        k = allowed[0]
-        btns = [[B(text=f"🃏 Ochish: {D.CARD_ICONS[k]} {D.CARD_LABELS[k]}",
-                   callback_data=f"tc:{g.id}:{g.turn_seq}:{k}")]]
-    else:
-        bb = [B(text=f"{D.CARD_ICONS[k]} {D.CARD_LABELS[k]}", callback_data=f"tc:{g.id}:{g.turn_seq}:{k}")
-              for k in allowed]
-        btns = [bb[i:i + 2] for i in range(0, len(bb), 2)]
-    btns.append([B(text="👀 Kartalarimni ko'rish", callback_data=f"my:{g.id}")])
-    return kb(btns)
+    rows = []
+    for k in allowed:
+        label = f"{D.CARD_ICONS[k]} {D.CARD_LABELS[k]}"
+        if reveal:
+            t = p["cards"][k]["t"]
+            label += " — " + (t if len(t) <= 38 else t[:36] + "…")
+        rows.append(B(text=label, callback_data=f"tc:{g.id}:{g.turn_seq}:{k}"))
+    if reveal:
+        return kb([[x] for x in rows])
+    return kb([rows[i:i + 2] for i in range(0, len(rows), 2)])
+
+
+def turn_dm(g, p):
+    lines = ["👉 <b>Navbatingiz keldi!</b>", "", turn_instruction(g, p), ""]
+    if len(__import__("game").allowed_types(g, p)) > 1:
+        lines.append("Tugmalarda kartalaringiz yozilgan — qaysi birini hammaga ko'rsatasiz?")
+    lines.append(f"<i>⏱ {g.phase_time('choose')} s · vaqt tugasa, karta avtomatik ochiladi</i>")
+    return "\n".join(lines)
 
 
 def turn_card(g, p, kind, auto=False, talking=True):
@@ -442,3 +450,60 @@ def turn_card(g, p, kind, auto=False, talking=True):
 
 def turn_talk_kb(g):
     return kb([[B(text="⏭ Tugatdim", callback_data=f"td:{g.id}:{g.turn_seq}")]])
+
+
+def turn_instruction(g, p):
+    from game import allowed_types
+    allowed = allowed_types(g, p)
+    if g.round == 1:
+        return "💼 <b>Kasb</b> kartangizni oching va o'zingizni qisqacha tanishtiring."
+    if g.turn_idx == 0 or not g.round_type:
+        return ("Siz raundni boshlaysiz: <b>qaysi turdagi kartani ochasiz?</b> "
+                "Qolganlar ham aynan shu turdagi kartani ochadi.")
+    k = g.round_type
+    if k in allowed:
+        return f"{D.CARD_ICONS[k]} <b>{D.CARD_LABELS[k]}</b> kartangizni oching."
+    return f"Sizning {D.CARD_LABELS[k].lower()} kartangiz allaqachon ochiq — istalgan boshqa kartani tanlang."
+
+
+def turn_block(g, cur):
+    """Bitta aylana uchun yig'ma xabar."""
+    if g.round == 1:
+        title = "🃏 <b>1-raund · 💼 Kasb</b>"
+    elif g.round_type:
+        title = f"🃏 <b>{g.round}-raund · {D.CARD_ICONS[g.round_type]} {D.CARD_LABELS[g.round_type]}</b>"
+    else:
+        title = f"🃏 <b>{g.round}-raund</b> · karta turi tanlanmoqda"
+    if g.reveals_needed() > 1:
+        title += f"  <i>({g.cycle + 1}-aylana)</i>"
+    lines = [title, LINE]
+    log = {e[0]: e for e in (g.turn_log or [])}
+    for uid in g.turn_order or []:
+        p = g.players.get(uid)
+        if not p:
+            continue
+        e = log.get(uid)
+        if e:
+            k = e[1]
+            card = f"{D.CARD_ICONS[k]} {p['cards'][k]['t']}"
+            if cur and cur["uid"] == uid and g.turn_state == "talk":
+                lines.append(f"🎤 <b>{p['name']}</b> — {card}")
+                lines.append(f"      <i>gapirmoqda · ⏱ {g.phase_time('talk')} s</i>")
+            else:
+                lines.append(f"✅ <b>{p['name']}</b> — {card}" + ("  <i>(avto)</i>" if e[2] else ""))
+        elif cur and cur["uid"] == uid:
+            lines.append(f"👉 <b>{p['name']}</b> — <i>kartasini tanlamoqda…</i>")
+        elif p["alive"] and g.closed(p):
+            lines.append(f"⌛ {p['name']}")
+    lines.append(LINE)
+    if cur and g.turn_state == "choose":
+        if g.mode == "group" and not g.choose_fallback and not cur["uid"].startswith("ai"):
+            lines.append(f"👉 <b>Navbat: {cur['name']}</b> — kartani botda tanlamoqda…")
+        else:
+            lines.append(f"<b>Navbat: {cur['name']}</b>. " + turn_instruction(g, cur))
+        lines.append(f"<i>⏱ {g.phase_time('choose')} s · vaqt tugasa, karta avtomatik ochiladi</i>")
+    elif cur and g.turn_state == "talk":
+        lines.append(f"<i>{cur['name']}, gapirib bo'lgach «⏭ Tugatdim»ni bosing.</i>")
+    else:
+        lines.append("✅ <i>Hamma kartasini ochdi.</i>")
+    return "\n".join(lines)

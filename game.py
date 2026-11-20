@@ -49,7 +49,7 @@ class Game:
         "lastword", "effects", "open2_next", "open2", "msgs", "history", "created",
         "result", "round_reveals", "phase_started", "joy_used",
         "turn_order", "turn_idx", "round_type", "turn_state", "turn_seq", "cycle",
-        "last_turn_kind",
+        "last_turn_kind", "turn_log", "choose_fallback",
     ]
 
     def __init__(self, gid=None, mode="group", chat_id=None, host=None):
@@ -79,7 +79,7 @@ class Game:
         self.open2_next = False
         self.open2 = False
         # xabarlar: [[chat_id, message_id], ...]
-        self.msgs = {"lobby": [], "board": [], "vote": [], "cards": {}}
+        self.msgs = {"lobby": [], "board": [], "vote": [], "cards": {}, "turn": [], "choose": None}
         self.history = []
         self.created = time.time()
         self.result = None
@@ -93,6 +93,8 @@ class Game:
         self.turn_seq = 0
         self.cycle = 0
         self.last_turn_kind = None
+        self.turn_log = []
+        self.choose_fallback = False
 
     # ---------------------------------------------------- serializatsiya
     def to_dict(self):

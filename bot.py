@@ -332,6 +332,8 @@ async def begin_cycle(g):
     g.turn_order = [p["uid"] for p in g.alive()]
     g.turn_idx = -1
     g.round_type = None
+    g.turn_log = []
+    g.msgs["turn"] = []
     await next_turn(g)
 
 
@@ -345,6 +347,8 @@ async def next_turn(g):
     while True:
         g.turn_idx += 1
         if g.turn_idx >= len(g.turn_order):
+            g.turn_state = "done"
+            await update_block(g)
             g.cycle += 1
             if g.cycle < g.reveals_needed() and any(g.closed(p) for p in g.alive()):
                 await begin_cycle(g)
@@ -369,47 +373,79 @@ def _mention(p):
 
 
 async def post_turn(g, p):
-    g.msgs["turn"] = []
-    text = R.turn_choose(g, p, _mention(p))
-    markup = R.turn_choose_kb(g, p)
-    if g.mode == "group":
-        mid = await send(g.chat_id, text, markup)
-        g.msgs["turn"].append([g.chat_id, mid, "*"])
+    g.choose_fallback = False
+    g.msgs["choose"] = None
+    if g.mode == "group" and not is_bot(p["uid"]):
+        mid = await send(p["uid"], R.turn_dm(g, p), R.turn_choose_kb(g, p, reveal=True))
+        if mid:
+            g.msgs["choose"] = [p["uid"], mid]
+        else:
+            g.choose_fallback = True
+    await update_block(g)
+
+
+async def close_choose_dm(g, p, kind, auto):
+    ch = g.msgs.get("choose")
+    if not ch:
+        return
+    c = p["cards"][kind]
+    if auto:
+        text = f"⏱ Vaqt tugadi — avtomatik ochildi: {D.CARD_ICONS[kind]} <b>{c['t']}</b>"
     else:
-        for q in g.all_players():
-            mine = q["uid"] == p["uid"]
-            mid = await send(q["uid"], text, markup if mine else None)
-            g.msgs["turn"].append([q["uid"], mid, q["uid"] if mine else None])
+        text = (f"✅ Ochildi: {D.CARD_ICONS[kind]} {D.CARD_LABELS[kind]} — <b>{c['t']}</b>\n\n"
+                f"Hamma ochib bo'lgach, guruhda muhokama boshlanadi 💬")
+    await edit(ch[0], ch[1], text, None)
+    g.msgs["choose"] = None
+
+
+async def update_block(g):
+    """Raundning yagona xabari: kartalar tagma-tag qo'shilib boradi."""
+    cur = current_turn(g) if g.turn_state in ("choose", "talk") else None
+    text = R.turn_block(g, cur)
+
+    def markup_for(viewer):
+        if not cur:
+            return None
+        if viewer != "*" and viewer != cur["uid"]:
+            return None
+        if g.turn_state == "choose":
+            if g.mode == "group":
+                # guruhda tugmalar faqat bot yoza olmasa chiqadi (kartaning matnisiz)
+                return R.turn_choose_kb(g, cur, reveal=False) if g.choose_fallback else None
+            return R.turn_choose_kb(g, cur, reveal=True)
+        return R.turn_talk_kb(g)
+
+    if not g.msgs.get("turn"):
+        g.msgs["turn"] = []
+        if g.mode == "group":
+            mid = await send(g.chat_id, text, markup_for("*"))
+            g.msgs["turn"].append([g.chat_id, mid, "*"])
+        else:
+            for q in g.all_players():
+                mid = await send(q["uid"], text, markup_for(q["uid"]))
+                g.msgs["turn"].append([q["uid"], mid, q["uid"]])
+        return
+    for chat, mid, viewer in g.msgs["turn"]:
+        await edit(chat, mid, text, markup_for(viewer))
 
 
 async def show_turn_card(g, p, kind, auto=False, talking=True):
-    text = R.turn_card(g, p, kind, auto=auto, talking=talking)
-    for chat, mid, who in g.msgs.get("turn", []):
-        markup = R.turn_talk_kb(g) if (talking and who) else None
-        await edit(chat, mid, text, markup)
+    await update_block(g)
 
 
 async def reveal_in_turn(g, p, kind, auto=False):
     """Navbatdagi o'yinchi kartasini ochadi."""
     G.open_card(g, p, kind)
+    g.turn_log.append([p["uid"], kind, bool(auto)])
+    await close_choose_dm(g, p, kind, auto)
     if g.turn_idx == 0 and g.round > 1 and not g.round_type:
         g.round_type = kind
     g.last_turn_kind = kind
-    if auto:
-        await show_turn_card(g, p, kind, auto=True, talking=False)
-        await next_turn(g)
-        return
-    g.turn_state = "talk"
-    set_phase(g, "turn", g.phase_time("talk"))
-    await show_turn_card(g, p, kind, talking=True)
     await refresh_cards(g, p)
-    poke(g)
+    await next_turn(g)
 
 
 async def end_turn_talk(g):
-    p = current_turn(g)
-    if p and g.last_turn_kind:
-        await show_turn_card(g, p, g.last_turn_kind, talking=False)
     await next_turn(g)
 
 
@@ -441,8 +477,10 @@ async def end_turns(g):
     else:
         lines.append(f"\n💬 <b>Muhokama: {t} s.</b> Kim bunkerga loyiq, kim emas? Gapiring, isbotlang, blef qiling!")
     lines.append("<i>Hamma «Tayyorman» bossa, muhokama erta tugaydi.</i>")
+    lines.append("<i>Bahs qizib ketsa, xost «+30 s» bilan vaqt qo'shishi mumkin.</i>")
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Tayyorman", callback_data=f"rd:{g.id}")],
+        [InlineKeyboardButton(text="✅ Tayyorman", callback_data=f"rd:{g.id}"),
+         InlineKeyboardButton(text="⏱ +30 s", callback_data=f"h:{g.id}:plus")],
         [InlineKeyboardButton(text="🃏 Mening kartalarim", callback_data=f"my:{g.id}")],
     ])
     await broadcast(g, "\n".join(lines), markup)
@@ -1338,7 +1376,7 @@ async def cb_host(cb: CallbackQuery):
         await answer(cb)
         return
     if g.host != str(cb.from_user.id):
-        await answer(cb, "Bu tugmalar faqat xost uchun.", alert=True)
+        await answer(cb, "Vaqtni faqat o'yinni boshlagan xost (👑) qo'sha oladi.", alert=True)
         return
     cmd = parts[2]
     async with lock(g.id):
@@ -1356,9 +1394,13 @@ async def cb_host(cb: CallbackQuery):
         elif cmd == "plus":
             if g.paused_left is not None:
                 g.paused_left += 30
+                left = g.paused_left
             else:
                 g.deadline += 30
+                left = g.deadline - now
             msg = "+30 soniya"
+            if g.phase == "discuss":
+                await broadcast(g, f"⏱ Xost muhokamaga <b>+30 soniya</b> qo'shdi. Qoldi: {R.fmt_time(left)}")
         else:
             if g.paused_left is not None:
                 g.paused_left = None
