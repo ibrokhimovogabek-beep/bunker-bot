@@ -82,7 +82,13 @@ def clean_name(user, g=None):
 
 # ======================================================== TELEGRAM I/O
 
+def is_bot(uid):
+    return str(uid).startswith("ai")
+
+
 async def send(chat, text, markup=None):
+    if is_bot(chat):
+        return None
     for _ in range(2):
         try:
             m = await BOT.send_message(int(chat), text, reply_markup=markup)
@@ -99,7 +105,7 @@ async def send(chat, text, markup=None):
 
 
 async def edit(chat, mid, text, markup=None):
-    if not mid:
+    if not mid or is_bot(chat):
         return
     key = f"{chat}:{mid}"
     sig = text + (markup.model_dump_json() if markup else "")
@@ -275,7 +281,7 @@ async def start_game(g):
     await post_board(g)
     for p in g.alive():
         mid = await post_cards(g, p)
-        if not mid and g.mode == "group":
+        if not mid and g.mode == "group" and not is_bot(p["uid"]):
             await send(g.chat_id, f"⚠️ {p['name']}, bot sizga yoza olmayapti. "
                                   f"Botni oching va Start bosing: @{BOT_USERNAME}")
     await save(g)
@@ -434,6 +440,47 @@ def phase_complete(g):
     return False
 
 
+BOT_NAMES = ["Robo-Ali", "Robo-Zarina", "Robo-Botir", "Robo-Malika", "Robo-Sanjar", "Robo-Dilnoza",
+             "Robo-Jamshid", "Robo-Nodira", "Robo-Sherzod", "Robo-Gulnora", "Robo-Farrux", "Robo-Shahzoda",
+             "Robo-Otabek"]
+
+
+def _opened_score(p):
+    return sum(p["cards"][k].get("s", 0) for k in p["opened"])
+
+
+async def bots_act(g):
+    """Sun'iy o'yinchilar: odamlarga vaqt qoldirib, sekin harakat qiladi."""
+    el = time.time() - (g.phase_started or time.time())
+    total = max(1, (g.deadline or time.time()) - (g.phase_started or time.time()))
+    changed = False
+    for p in g.alive():
+        if not is_bot(p["uid"]):
+            continue
+        r = random.Random(f"{g.id}{p['uid']}{g.round}{g.phase}{g.vote_seq}").random()
+        if g.phase == "reveal" and el > 2 + r * 6:
+            while g.need_more(p) > 0 and g.closed(p):
+                G.open_card(g, p, random.choice(g.closed(p)))
+                changed = True
+        elif g.phase == "discuss" and not p["ready"] and el > total * (0.35 + r * 0.3):
+            p["ready"] = True
+            changed = True
+        elif g.phase in ("vote", "revote") and p["uid"] not in g.votes and el > 3 + r * 8:
+            cands = [c for c in G.candidates(g) if c["uid"] != p["uid"]]
+            if cands:
+                # ochilgan kartalari 'yomonroq' o'yinchiga ko'proq ovoz beradi
+                w = [max(1, 8 - _opened_score(c)) for c in cands]
+                g.votes[p["uid"]] = random.choices(cands, weights=w)[0]["uid"]
+                changed = True
+    if g.phase == "lastword" and g.lastword and is_bot(g.lastword) and el > 4:
+        bp = g.players[g.lastword]
+        if not bp.get("lw_done"):
+            bp["lw_done"] = True
+            changed = True
+    if changed:
+        DIRTY[g.id] = True
+
+
 async def game_loop(gid):
     ev = event(gid)
     while True:
@@ -443,6 +490,8 @@ async def game_loop(gid):
         now = time.time()
         timeout = 15.0 if g.paused_left is not None else max(0.0, g.deadline - now)
         timeout = min(timeout, 15.0)
+        if any(is_bot(p["uid"]) for p in g.alive()):
+            timeout = min(timeout, 1.5)
         if DIRTY.get(gid):
             timeout = min(timeout, max(0.0, 4.0 - (now - LAST_REFRESH.get(gid, 0))))
         try:
@@ -456,6 +505,8 @@ async def game_loop(gid):
                 return
             try:
                 now = time.time()
+                if g.paused_left is None:
+                    await bots_act(g)
                 if g.paused_left is None and (now >= g.deadline or phase_complete(g)):
                     await advance(g)
                     DIRTY[gid] = True
@@ -488,6 +539,8 @@ async def finish(g):
     await broadcast(g, tail.strip(), R.final_kb(g))
     await refresh_board(g)
     for p in g.all_players():
+        if is_bot(p["uid"]):
+            continue
         try:
             await STORE.add_stats(p["uid"], p["name"], 1, 1 if p["alive"] else 0,
                                   1 if (p["alive"] and ev["score"] >= 60) else 0)
@@ -922,6 +975,44 @@ async def cb_settings(cb: CallbackQuery):
     await answer(cb, "Sozlamalar shaxsiy xabarda ⚙️" if g.mode == "group" else None)
 
 
+@dp.callback_query(F.data.startswith("ab:"))
+async def cb_add_bot(cb: CallbackQuery):
+    _, g = parse(cb)
+    if not g or g.state != "lobby":
+        await answer(cb)
+        return
+    if g.host != str(cb.from_user.id):
+        await answer(cb, "Botlarni faqat xost qo'sha oladi.", alert=True)
+        return
+    async with lock(g.id):
+        if len(g.order) >= G.MAX_PLAYERS:
+            await answer(cb, "O'yin to'lgan (14/14).", alert=True)
+            return
+        used = {p["name"] for p in g.all_players()}
+        name = next((n for n in BOT_NAMES if "🤖 " + n not in used), f"Robo-{len(g.order)}")
+        i = 1
+        while f"ai{i}" in g.players:
+            i += 1
+        g.add_player(f"ai{i}", "🤖 " + name)
+        await refresh_lobby(g)
+        await save(g)
+    await answer(cb, f"🤖 {name} qo'shildi")
+
+
+@dp.callback_query(F.data.startswith("rb:"))
+async def cb_remove_bots(cb: CallbackQuery):
+    _, g = parse(cb)
+    if not g or g.state != "lobby" or g.host != str(cb.from_user.id):
+        await answer(cb)
+        return
+    async with lock(g.id):
+        for u in [u for u in g.order if is_bot(u)]:
+            g.remove_player(u)
+        await refresh_lobby(g)
+        await save(g)
+    await answer(cb, "Botlar olib tashlandi")
+
+
 CYCLES = {"discuss": [60, 90, 120, 180], "reveal": [30, 45, 60]}
 
 
@@ -1210,11 +1301,12 @@ async def cb_again(cb: CallbackQuery):
         # oldingi tarkibni qo'shamiz (bosgan kishi — xost)
         order = [uid] + [u for u in old.order if u != uid]
         for u in order:
-            if active_game_of(u) or u not in old.players and u != uid:
+            if (not is_bot(u) and active_game_of(u)) or (u not in old.players and u != uid):
                 continue
             name = old.players[u]["name"] if u in old.players else clean_name(cb.from_user, g)
             g.add_player(u, name)
-            USER_GAME[u] = g.id
+            if not is_bot(u):
+                USER_GAME[u] = g.id
         g.host = uid if uid in g.players else (g.order[0] if g.order else None)
         text, markup = R.lobby(g, BOT_USERNAME)
         if g.mode == "group":

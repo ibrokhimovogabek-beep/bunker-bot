@@ -64,6 +64,7 @@ def lobby(g, bot_username):
     lines.append("")
     if n < 4:
         lines.append(f"Boshlash uchun yana <b>{4 - n}</b> kishi kerak.")
+        lines.append("<i>Odam yetmasa, xost «🤖 Bot qo'shish» bilan sun'iy o'yinchilar qo'shishi mumkin.</i>")
     else:
         seats = 2 if n <= 10 else 3
         lines.append(f"✅ Boshlash mumkin. Bunkerda <b>{seats} ta joy</b> bo'ladi.")
@@ -74,6 +75,9 @@ def lobby(g, bot_username):
         lines.append(f"🔗 Taklif havolasi:\n{link}")
     rows = [
         [B(text="➕ Qo'shilish", callback_data=f"j:{g.id}"), B(text="➖ Chiqish", callback_data=f"lv:{g.id}")],
+        [B(text="🤖 Bot qo'shish", callback_data=f"ab:{g.id}")]
+        + ([B(text="🧹 Botlarni olib tashlash", callback_data=f"rb:{g.id}")]
+           if any(u.startswith("ai") for u in g.order) else []),
         [B(text="⚙️ Sozlamalar", callback_data=f"set:{g.id}"), B(text="▶️ Boshlash", callback_data=f"st:{g.id}")],
     ]
     if g.mode == "room":
