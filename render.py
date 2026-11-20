@@ -10,6 +10,8 @@ import data as D
 LINE = "━━━━━━━━━━━━━━━"
 
 PHASES = {
+    "intro": "📖 Vaziyat bilan tanishish",
+    "turn": "🃏 Karta ochish",
     "reveal": "🃏 Karta ochish",
     "discuss": "💬 Muhokama",
     "vote": "🗳 Ovoz berish",
@@ -94,7 +96,8 @@ def settings(g):
             "Tugmani bossangiz, qiymat almashadi. Standart qiymatlar bilan ham o'yin yaxshi o'tadi.")
     rows = [
         [B(text=f"💬 Muhokama: {s['discuss']} s", callback_data=f"sg:{g.id}:discuss")],
-        [B(text=f"🃏 Karta ochish: {s['reveal']} s", callback_data=f"sg:{g.id}:reveal")],
+        [B(text=f"🃏 Kartani tanlash: {s['reveal']} s", callback_data=f"sg:{g.id}:reveal")],
+        [B(text=f"🎤 Gapirish navbati: {s.get('speak', 30)} s", callback_data=f"sg:{g.id}:speak")],
         [B(text="🗳 Ovoz: " + ("Yashirin" if s["secret"] else "Ochiq"), callback_data=f"sg:{g.id}:secret")],
         [B(text="✨ Maxsus kartalar: " + ("Yoqilgan" if s["specials"] else "O'chirilgan"), callback_data=f"sg:{g.id}:specials")],
         [B(text="⚡ Tezkor rejim: " + ("Yoqilgan" if s["fast"] else "O'chirilgan"), callback_data=f"sg:{g.id}:fast")],
@@ -131,9 +134,16 @@ def scenario(g):
 # ======================================================== O'YIN TAXTASI
 
 def _status_mark(g, p):
+    if g.phase == "turn":
+        order = g.turn_order or []
+        if g.turn_idx is not None and 0 <= g.turn_idx < len(order) and order[g.turn_idx] == p["uid"]:
+            return " 👉"
+        if p["uid"] in order and order.index(p["uid"]) < (g.turn_idx or 0):
+            return " ✓"
+        return ""
     if g.phase == "reveal":
         return " ✓" if g.need_more(p) == 0 else " ⌛"
-    if g.phase == "discuss":
+    if g.phase in ("discuss", "intro"):
         return " ✅" if p["ready"] else ""
     if g.phase in ("vote", "revote"):
         return " 🗳" if p["uid"] in g.votes else ""
@@ -151,12 +161,16 @@ def board(g):
     ]
     ph = PHASES.get(g.phase, "")
     rnd = "1-raund (tanishuv)" if g.round == 1 else f"{g.round}-raund"
+    if g.phase == "intro":
+        rnd = "Boshlanishdan oldin"
     if g.state == "done":
         lines.append("🏁 <b>O'yin tugadi</b> · bunkerga kirganlar:")
     else:
         lines.append(f"<b>{rnd}</b> · {ph} · {time_left(g)}")
     if g.state == "done":
         pass
+    elif g.phase == "intro":
+        lines.append("<i>Vaziyat va kartalaringiz bilan tanishing</i>")
     elif g.round == 1:
         lines.append("<i>Bu raundda ovoz berilmaydi</i>")
     elif rem > 0:
@@ -186,7 +200,7 @@ def board_kb(g):
     rows = []
     if g.state == "done":
         return None
-    if g.phase == "discuss":
+    if g.phase in ("discuss", "intro"):
         rows.append([B(text="✅ Tayyorman", callback_data=f"rd:{g.id}")])
     rows.append([B(text="🃏 Mening kartalarim", callback_data=f"my:{g.id}")])
     return kb(rows)
@@ -220,12 +234,15 @@ def _prompt(g, p):
             return ("🎤 <b>Oxirgi so'z.</b> Xohlasangiz, bitta kartangizni ochib, nega xato qilishganini "
                     "isbotlang. Gapirib bo'lgach «Tugatdim»ni bosing.")
         return "🌫 Siz tashqaridasiz. O'yinni kuzatishda davom etishingiz mumkin."
-    if g.phase == "reveal":
-        n = g.need_more(p)
-        if n > 0:
-            extra = " (kasbingiz avtomatik ochildi)" if g.round == 1 else ""
-            return f"👉 <b>Sizning navbatingiz:</b> yana <b>{n}</b> ta kartani tanlab oching{extra}."
-        return "✓ Kartangiz ochildi. Boshqalarni kutamiz..."
+    if g.phase == "intro":
+        return "📖 Vaziyat bilan tanishing va kartalaringizni ko'rib chiqing. Hozircha hech kimga aytmang!"
+    if g.phase == "turn":
+        order = g.turn_order or []
+        cur = order[g.turn_idx] if g.turn_idx is not None and 0 <= g.turn_idx < len(order) else None
+        if cur == p["uid"]:
+            where = "guruhdagi" if g.mode == "group" else "pastdagi"
+            return f"👉 <b>Sizning navbatingiz!</b> Kartani {where} xabar orqali oching."
+        return "🃏 Kartalar navbatma-navbat ochilmoqda. Navbatingizni kuting."
     if g.phase == "discuss":
         return "💬 Muhokama ketmoqda. Nega aynan siz bunkerga kirishingiz kerakligini isbotlang!"
     if g.phase in ("vote", "revote"):
@@ -237,10 +254,6 @@ def _prompt(g, p):
 
 def cards_kb(g, p):
     rows = []
-    if p["alive"] and g.phase == "reveal" and g.need_more(p) > 0:
-        btns = [B(text=f"{D.CARD_ICONS[k]} {D.CARD_LABELS[k]}", callback_data=f"rv:{g.id}:{k}")
-                for k in g.closed(p)]
-        rows += [btns[i:i + 2] for i in range(0, len(btns), 2)]
     if (not p["alive"]) and g.phase == "lastword" and g.lastword == p["uid"]:
         btns = []
         if not p.get("lw_open"):
@@ -249,7 +262,7 @@ def cards_kb(g, p):
         rows += [btns[i:i + 2] for i in range(0, len(btns), 2)]
         rows.append([B(text="✅ Tugatdim", callback_data=f"lwd:{g.id}")])
     if (p["alive"] and p.get("action") and not p["action_used"]
-            and g.phase in ("reveal", "discuss", "vote", "defense", "revote")):
+            and g.phase in ("turn", "discuss", "vote", "defense", "revote")):
         rows.append([B(text=f"✨ Ishlatish: {D.ACTIONS[p['action']][0]}", callback_data=f"ac:{g.id}")])
     if p["uid"] == g.host and g.state == "play":
         paused = g.paused_left is not None
@@ -367,3 +380,65 @@ def welcome(bot_username):
         [B(text="➕ Guruhga qo'shish", url=f"https://t.me/{bot_username}?startgroup=bunker")],
         [B(text="📖 Qoidalar", callback_data="m:rules"), B(text="👤 Profil", callback_data="m:profile")],
     ])
+
+
+# ======================================================== NAVBAT
+
+def _progress(g):
+    n = len(g.turn_order or [])
+    return f"{(g.turn_idx or 0) + 1}/{n}" if n else ""
+
+
+def turn_choose(g, p, mention):
+    from game import allowed_types
+    allowed = allowed_types(g, p)
+    lines = [f"🎯 <b>Navbat:</b> {mention}  <i>({_progress(g)})</i>", ""]
+    if g.round == 1:
+        lines.append("💼 <b>Kasb</b> kartangizni oching va o'zingizni qisqacha tanishtiring.")
+    elif g.turn_idx == 0 or not g.round_type:
+        lines.append("Siz raundni boshlaysiz: <b>qaysi turdagi kartani ochasiz?</b>\n"
+                     "Qolganlar ham aynan shu turdagi kartani ochadi.")
+    elif g.round_type in allowed:
+        k = g.round_type
+        lines.append(f"Bu raund kartasi: {D.CARD_ICONS[k]} <b>{D.CARD_LABELS[k]}</b>. Oching!")
+    else:
+        k = g.round_type
+        lines.append(f"Sizning {D.CARD_LABELS[k].lower()} kartangiz allaqachon ochiq — istalgan boshqa kartani tanlang.")
+    lines.append("")
+    lines.append(f"⏱ {g.phase_time('choose')} s · vaqt tugasa, karta avtomatik ochiladi")
+    return "\n".join(lines)
+
+
+def turn_choose_kb(g, p):
+    from game import allowed_types
+    allowed = allowed_types(g, p)
+    if len(allowed) == 1:
+        k = allowed[0]
+        btns = [[B(text=f"🃏 Ochish: {D.CARD_ICONS[k]} {D.CARD_LABELS[k]}",
+                   callback_data=f"tc:{g.id}:{g.turn_seq}:{k}")]]
+    else:
+        bb = [B(text=f"{D.CARD_ICONS[k]} {D.CARD_LABELS[k]}", callback_data=f"tc:{g.id}:{g.turn_seq}:{k}")
+              for k in allowed]
+        btns = [bb[i:i + 2] for i in range(0, len(bb), 2)]
+    btns.append([B(text="👀 Kartalarimni ko'rish", callback_data=f"my:{g.id}")])
+    return kb(btns)
+
+
+def turn_card(g, p, kind, auto=False, talking=True):
+    c = p["cards"][kind]
+    head = f"🃏 <b>{p['name']}</b> kartasini ochdi" + (" <i>(vaqt tugadi, avtomatik)</i>" if auto else "")
+    lines = [head, "", LINE,
+             f"{D.CARD_ICONS[kind]}  <b>{D.CARD_LABELS[kind].upper()}</b>",
+             f"<b>{c['t']}</b>",
+             LINE]
+    prev = [k for k in D.CARD_TYPES if k in p["opened"] and k != kind]
+    if prev:
+        lines.append("<i>Avval ochilgan: " + " · ".join(f"{D.CARD_ICONS[k]} {p['cards'][k]['t']}" for k in prev) + "</i>")
+    if talking:
+        lines.append("")
+        lines.append(f"🎤 <b>{p['name']}</b> gapirmoqda · ⏱ {g.phase_time('talk')} s")
+    return "\n".join(lines)
+
+
+def turn_talk_kb(g):
+    return kb([[B(text="⏭ Tugatdim", callback_data=f"td:{g.id}:{g.turn_seq}")]])

@@ -272,60 +272,172 @@ async def start_game(g):
         await edit(chat, mid, f"🏚 <b>BUNKER</b>\n\n✅ O'yin boshlandi · {n} o'yinchi · bunkerda {g.seats} joy", None)
     await broadcast(g, R.scenario(g))
     G.start_round(g)
-    set_phase(g, "reveal")
-    await broadcast(
-        g,
-        "🃏 <b>1-raund · Tanishuv</b>\n\nHammaning kasbi ochildi. Endi har kim shaxsiy xabarda "
-        f"yana <b>bitta</b> kartasini tanlab ochadi. ⏱ {g.phase_time('reveal')} s",
-        dm_button() if g.mode == "group" else None)
-    await post_board(g)
     for p in g.alive():
         mid = await post_cards(g, p)
         if not mid and g.mode == "group" and not is_bot(p["uid"]):
             await send(g.chat_id, f"⚠️ {p['name']}, bot sizga yoza olmayapti. "
                                   f"Botni oching va Start bosing: @{BOT_USERNAME}")
+    set_phase(g, "intro", g.phase_time("intro"))
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Tanishdim", callback_data=f"rd:{g.id}")],
+        [InlineKeyboardButton(text="🃏 Mening kartalarim", callback_data=f"my:{g.id}")],
+    ])
+    where = "shaxsiy xabarda (botda)" if g.mode == "group" else "shu chatda"
+    await broadcast(
+        g,
+        f"📖 <b>Vaziyat bilan tanishing</b> · ⏱ {g.phase_time('intro')} s\n\n"
+        "Yuqoridagi falokat va bunker haqida o'qib chiqing. Kartalaringiz "
+        f"{where} — kim ekaningizni bilib oling, lekin hozircha hech kimga aytmang 🤫\n\n"
+        "<i>Hamma «Tanishdim» bossa, 1-raund darrov boshlanadi.</i>",
+        markup)
+    await post_board(g)
     await save(g)
     TASKS[g.id] = asyncio.create_task(game_loop(g.id))
 
 
+async def end_intro(g):
+    for p in g.alive():
+        p["ready"] = False
+    order = " → ".join(p["name"] for p in g.alive())
+    await broadcast(
+        g,
+        "🃏 <b>1-raund boshlandi</b>\n\n"
+        "Kartalar <b>navbatma-navbat</b> ochiladi. Bu raundda hamma <b>💼 Kasb</b>ini ochadi va "
+        "o'zini qisqacha tanishtiradi.\n\n"
+        f"<b>Navbat:</b> {order}")
+    await begin_cycle(g)
+
+
 async def start_reveal(g):
+    """Yangi raund: navbatma-navbat karta ochish."""
     if g.remaining_kicks() <= 0:
         await finish(g)
         return
-    set_phase(g, "reveal")
     n = g.reveals_needed()
     extra = ""
-    if g.open2 and not g.settings.get("fast"):
-        extra = "\n<i>«Hamma ochsin» kartasi tufayli bu raundda 2 tadan.</i>"
-    left = g.remaining_kicks()
+    if n > 1:
+        extra = f"\n<i>Bu raundda har kim {n} ta karta ochadi (navbat {n} marta aylanadi).</i>"
+    first = g.alive()[0]["name"]
     await broadcast(
         g,
-        f"🃏 <b>{g.round}-raund</b>\n\nHar kim shaxsiy xabarda <b>{n}</b> ta kartasini ochadi. "
-        f"⏱ {g.phase_time('reveal')} s{extra}\n"
-        f"<i>Bu raundda {g.kicks_round} kishi chiqadi · bunkerga hali {left} kishi ortiqcha.</i>",
-        dm_button() if g.mode == "group" else None)
-    for p in g.alive():
-        await post_cards(g, p)
+        f"🃏 <b>{g.round}-raund</b>\n\n"
+        f"<b>{first}</b> birinchi bo'lib qaysi turdagi kartani ochishni tanlaydi — "
+        f"qolganlar ham aynan shu turdagi kartani ochadi.{extra}\n"
+        f"<i>Bu raundda {g.kicks_round} kishi chiqadi.</i>")
+    await refresh_all_cards(g)
+    await begin_cycle(g)
+
+
+async def begin_cycle(g):
+    g.turn_order = [p["uid"] for p in g.alive()]
+    g.turn_idx = -1
+    g.round_type = None
+    await next_turn(g)
+
+
+def current_turn(g):
+    if g.turn_idx is None or g.turn_idx < 0 or g.turn_idx >= len(g.turn_order):
+        return None
+    return g.players.get(g.turn_order[g.turn_idx])
+
+
+async def next_turn(g):
+    while True:
+        g.turn_idx += 1
+        if g.turn_idx >= len(g.turn_order):
+            g.cycle += 1
+            if g.cycle < g.reveals_needed() and any(g.closed(p) for p in g.alive()):
+                await begin_cycle(g)
+            else:
+                await end_turns(g)
+            return
+        p = current_turn(g)
+        if p and p["alive"] and G.allowed_types(g, p):
+            break
+    g.turn_seq += 1
+    g.turn_state = "choose"
+    p["talk_done"] = False
+    set_phase(g, "turn", g.phase_time("choose"))
+    await post_turn(g, p)
     poke(g)
 
 
-async def end_reveal(g):
-    auto = G.auto_reveal(g)
-    auto_set = {(p["uid"], k) for p, k in auto}
-    lines = [f"🃏 <b>{g.round}-raundda ochilgan kartalar</b>", ""]
+def _mention(p):
+    if is_bot(p["uid"]):
+        return f"<b>{p['name']}</b>"
+    return f'<a href="tg://user?id={p["uid"]}"><b>{p["name"]}</b></a>'
+
+
+async def post_turn(g, p):
+    g.msgs["turn"] = []
+    text = R.turn_choose(g, p, _mention(p))
+    markup = R.turn_choose_kb(g, p)
+    if g.mode == "group":
+        mid = await send(g.chat_id, text, markup)
+        g.msgs["turn"].append([g.chat_id, mid, "*"])
+    else:
+        for q in g.all_players():
+            mine = q["uid"] == p["uid"]
+            mid = await send(q["uid"], text, markup if mine else None)
+            g.msgs["turn"].append([q["uid"], mid, q["uid"] if mine else None])
+
+
+async def show_turn_card(g, p, kind, auto=False, talking=True):
+    text = R.turn_card(g, p, kind, auto=auto, talking=talking)
+    for chat, mid, who in g.msgs.get("turn", []):
+        markup = R.turn_talk_kb(g) if (talking and who) else None
+        await edit(chat, mid, text, markup)
+
+
+async def reveal_in_turn(g, p, kind, auto=False):
+    """Navbatdagi o'yinchi kartasini ochadi."""
+    G.open_card(g, p, kind)
+    if g.turn_idx == 0 and g.round > 1 and not g.round_type:
+        g.round_type = kind
+    g.last_turn_kind = kind
+    if auto:
+        await show_turn_card(g, p, kind, auto=True, talking=False)
+        await next_turn(g)
+        return
+    g.turn_state = "talk"
+    set_phase(g, "turn", g.phase_time("talk"))
+    await show_turn_card(g, p, kind, talking=True)
+    await refresh_cards(g, p)
+    poke(g)
+
+
+async def end_turn_talk(g):
+    p = current_turn(g)
+    if p and g.last_turn_kind:
+        await show_turn_card(g, p, g.last_turn_kind, talking=False)
+    await next_turn(g)
+
+
+async def advance_turn(g):
+    p = current_turn(g)
+    if not p or not p["alive"]:
+        await next_turn(g)
+        return
+    if g.turn_state == "choose":
+        allowed = G.allowed_types(g, p)
+        kind = allowed[0] if len(allowed) == 1 else random.choice(allowed)
+        await reveal_in_turn(g, p, kind, auto=True)
+    else:
+        await end_turn_talk(g)
+
+
+async def end_turns(g):
+    lines = [f"📋 <b>{g.round}-raund xulosasi</b>", ""]
     for p in g.alive():
         ks = g.round_reveals.get(p["uid"], [])
         if not ks:
             continue
-        parts = []
-        for k in ks:
-            a = " <i>(avto)</i>" if (p["uid"], k) in auto_set else ""
-            parts.append(f"{D.CARD_ICONS[k]} {p['cards'][k]['t']}{a}")
-        lines.append(f"<b>{p['name']}</b>\n   " + "\n   ".join(parts))
+        parts = [f"{D.CARD_ICONS[k]} {p['cards'][k]['t']}" for k in ks]
+        lines.append(f"<b>{p['name']}</b> — " + " · ".join(parts))
     set_phase(g, "discuss")
     t = g.phase_time("discuss")
     if g.round == 1:
-        lines.append(f"\n💬 <b>Tanishuv: {t} s.</b> O'zingizni tanishtiring — siz bunkerga nima olib kelasiz?")
+        lines.append(f"\n💬 <b>Erkin suhbat: {t} s.</b> Kim kimga foydali bo'ladi? Birinchi taassurotlar!")
     else:
         lines.append(f"\n💬 <b>Muhokama: {t} s.</b> Kim bunkerga loyiq, kim emas? Gapiring, isbotlang, blef qiling!")
     lines.append("<i>Hamma «Tayyorman» bossa, muhokama erta tugaydi.</i>")
@@ -413,8 +525,10 @@ async def end_lastword(g):
 
 async def advance(g):
     ph = g.phase
-    if ph == "reveal":
-        await end_reveal(g)
+    if ph == "intro":
+        await end_intro(g)
+    elif ph == "turn":
+        await advance_turn(g)
     elif ph == "discuss":
         await end_discuss(g)
     elif ph in ("vote", "revote"):
@@ -428,9 +542,12 @@ async def advance(g):
 
 def phase_complete(g):
     ph = g.phase
-    if ph == "reveal":
-        return G.all_revealed(g)
-    if ph == "discuss":
+    if ph == "turn":
+        p = current_turn(g)
+        if not p or not p["alive"]:
+            return True
+        return g.turn_state == "talk" and bool(p.get("talk_done"))
+    if ph in ("discuss", "intro"):
         return G.all_ready(g)
     if ph in ("vote", "revote"):
         return G.all_voted(g)
@@ -454,6 +571,16 @@ async def bots_act(g):
     el = time.time() - (g.phase_started or time.time())
     total = max(1, (g.deadline or time.time()) - (g.phase_started or time.time()))
     changed = False
+    if g.phase == "turn":
+        cur = current_turn(g)
+        if cur and is_bot(cur["uid"]) and cur["alive"]:
+            if g.turn_state == "choose" and el > 2.5:
+                await reveal_in_turn(g, cur, random.choice(G.allowed_types(g, cur)))
+                return
+            if g.turn_state == "talk" and el > 3.5 and not cur.get("talk_done"):
+                cur["talk_done"] = True
+                DIRTY[g.id] = True
+        return
     for p in g.alive():
         if not is_bot(p["uid"]):
             continue
@@ -462,7 +589,7 @@ async def bots_act(g):
             while g.need_more(p) > 0 and g.closed(p):
                 G.open_card(g, p, random.choice(g.closed(p)))
                 changed = True
-        elif g.phase == "discuss" and not p["ready"] and el > total * (0.35 + r * 0.3):
+        elif g.phase in ("discuss", "intro") and not p["ready"] and el > total * (0.35 + r * 0.3):
             p["ready"] = True
             changed = True
         elif g.phase in ("vote", "revote") and p["uid"] not in g.votes and el > 3 + r * 8:
@@ -1013,7 +1140,7 @@ async def cb_remove_bots(cb: CallbackQuery):
     await answer(cb, "Botlar olib tashlandi")
 
 
-CYCLES = {"discuss": [60, 90, 120, 180], "reveal": [30, 45, 60]}
+CYCLES = {"discuss": [60, 90, 120, 180], "reveal": [20, 30, 45, 60], "speak": [20, 30, 45, 60]}
 
 
 @dp.callback_query(F.data.startswith("sg:"))
@@ -1026,7 +1153,7 @@ async def cb_setting_toggle(cb: CallbackQuery):
     async with lock(g.id):
         if key in CYCLES:
             vals = CYCLES[key]
-            cur = g.settings[key]
+            cur = g.settings.get(key, vals[0])
             g.settings[key] = vals[(vals.index(cur) + 1) % len(vals)] if cur in vals else vals[0]
         else:
             g.settings[key] = not g.settings[key]
@@ -1043,28 +1170,48 @@ async def cb_setting_done(cb: CallbackQuery):
     await delete(cb.message.chat.id, cb.message.message_id)
 
 
-@dp.callback_query(F.data.startswith("rv:"))
-async def cb_reveal(cb: CallbackQuery):
+@dp.callback_query(F.data.startswith("tc:"))
+async def cb_turn_choose(cb: CallbackQuery):
     parts, g = parse(cb)
     if not g or g.state != "play":
         await answer(cb)
         return
     async with lock(g.id):
-        p = g.p(cb.from_user.id)
-        if not p or not p["alive"] or g.phase != "reveal":
-            await answer(cb, "Hozir karta ochish vaqti emas.")
+        if g.phase != "turn" or g.turn_state != "choose" or str(g.turn_seq) != parts[2]:
+            await answer(cb, "Bu navbat tugagan.")
             return
-        if g.need_more(p) <= 0:
-            await answer(cb, "Bu raund uchun yetarli karta ochdingiz ✓")
+        p = current_turn(g)
+        if not p or p["uid"] != str(cb.from_user.id):
+            who = p["name"] if p else ""
+            await answer(cb, f"Hozir {who}ning navbati. Sabr qiling 🙂", alert=False)
             return
-        kind = parts[2]
-        if not G.open_card(g, p, kind):
-            await answer(cb, "Bu karta allaqachon ochiq.")
+        kind = parts[3]
+        if kind not in G.allowed_types(g, p):
+            await answer(cb, "Bu kartani hozir ochib bo'lmaydi.")
             return
-        await refresh_cards(g, p)
+        await reveal_in_turn(g, p, kind)
         await save(g)
-        poke(g)
     await answer(cb, f"Ochildi: {D.CARD_LABELS[kind]} ✓")
+
+
+@dp.callback_query(F.data.startswith("td:"))
+async def cb_turn_done(cb: CallbackQuery):
+    parts, g = parse(cb)
+    if not g or g.state != "play":
+        await answer(cb)
+        return
+    async with lock(g.id):
+        p = current_turn(g)
+        if g.phase != "turn" or g.turn_state != "talk" or str(g.turn_seq) != parts[2] or not p:
+            await answer(cb)
+            return
+        uid = str(cb.from_user.id)
+        if uid != p["uid"] and uid != g.host:
+            await answer(cb, "Faqat navbatdagi o'yinchi (yoki xost) tugata oladi.")
+            return
+        p["talk_done"] = True
+        poke(g)
+    await answer(cb, "Navbat keyingisiga o'tadi ⏭")
 
 
 @dp.callback_query(F.data.startswith("rd:"))
@@ -1078,7 +1225,7 @@ async def cb_ready(cb: CallbackQuery):
         if not p or not p["alive"]:
             await answer(cb, "Siz bu o'yinda faol emassiz.")
             return
-        if g.phase != "discuss":
+        if g.phase not in ("discuss", "intro"):
             await answer(cb, "Hozir muhokama vaqti emas.")
             return
         p["ready"] = not p["ready"]
@@ -1163,7 +1310,7 @@ async def cb_action_target(cb: CallbackQuery):
     async with lock(g.id):
         p = g.p(cb.from_user.id)
         if (not p or not p["alive"] or not p.get("action") or p["action_used"]
-                or g.phase not in ("reveal", "discuss", "vote", "defense", "revote")):
+                or g.phase not in ("turn", "discuss", "vote", "defense", "revote")):
             await answer(cb, "Maxsus kartani hozir ishlatib bo'lmaydi.", alert=True)
             return
         target = None if parts[2] == "-" else parts[2]

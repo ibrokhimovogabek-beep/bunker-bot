@@ -12,8 +12,9 @@ MAX_PLAYERS = 14
 MAX_VOTE_ROUNDS = 6
 
 DEFAULT_SETTINGS = {
-    "discuss": 90,    # muhokama, soniya
-    "reveal": 45,     # karta ochish, soniya
+    "discuss": 120,   # muhokama, soniya
+    "reveal": 30,     # navbatda karta tanlash, soniya
+    "speak": 30,      # karta ochilgandan keyin gapirish, soniya
     "secret": False,  # yashirin ovoz
     "specials": True, # maxsus kartalar
     "fast": False,    # tezkor rejim
@@ -47,6 +48,8 @@ class Game:
         "vote_rounds", "kicks_round", "kicks_done", "tie", "votes", "vote_seq",
         "lastword", "effects", "open2_next", "open2", "msgs", "history", "created",
         "result", "round_reveals", "phase_started", "joy_used",
+        "turn_order", "turn_idx", "round_type", "turn_state", "turn_seq", "cycle",
+        "last_turn_kind",
     ]
 
     def __init__(self, gid=None, mode="group", chat_id=None, host=None):
@@ -83,6 +86,13 @@ class Game:
         self.round_reveals = {}
         self.phase_started = None
         self.joy_used = False
+        self.turn_order = []
+        self.turn_idx = -1
+        self.round_type = None
+        self.turn_state = None
+        self.turn_seq = 0
+        self.cycle = 0
+        self.last_turn_kind = None
 
     # ---------------------------------------------------- serializatsiya
     def to_dict(self):
@@ -138,7 +148,7 @@ class Game:
     def reveals_needed(self):
         """Shu raundda har bir o'yinchi nechta karta ochishi kerak."""
         if self.round == 1:
-            return 1  # kasb avtomatik + 1 tanlov
+            return 1  # hamma kasbini ochadi
         n = 2 if (self.settings.get("fast") or self.open2) else 1
         return n
 
@@ -150,8 +160,10 @@ class Game:
         s = self.settings
         k = 0.6 if s.get("fast") else 1.0
         t = {
-            "reveal": s["reveal"],
-            "discuss": s["discuss"] if self.round > 1 else max(60, s["discuss"]),
+            "choose": s["reveal"],
+            "talk": s.get("speak", 30),
+            "intro": 40,
+            "discuss": s["discuss"],
             "vote": VOTE_TIME,
             "defense": DEFENSE_TIME,
             "revote": VOTE_TIME,
@@ -301,17 +313,27 @@ def start_round(g: Game):
     g.open2 = g.open2_next
     g.open2_next = False
     g.kicks_done = 0
+    g.cycle = 0
     for p in g.alive():
         p["ready"] = False
     if g.round == 1:
-        for p in g.alive():
-            if "kasb" not in p["opened"]:
-                p["opened"].append("kasb")
         g.kicks_round = 0
     else:
         rem = g.remaining_kicks()
         rem_rounds = g.vote_rounds - (g.round - 2)
         g.kicks_round = rem if rem_rounds <= 1 else math.ceil(rem / rem_rounds)
+
+
+def allowed_types(g: Game, p):
+    """Navbatdagi o'yinchi qaysi kartalarni ocha oladi."""
+    cl = g.closed(p)
+    if not cl:
+        return []
+    if g.round == 1:
+        return ["kasb"] if "kasb" in cl else cl
+    if g.turn_idx == 0 or not g.round_type:
+        return cl
+    return [g.round_type] if g.round_type in cl else cl
 
 
 def open_card(g: Game, p, kind):

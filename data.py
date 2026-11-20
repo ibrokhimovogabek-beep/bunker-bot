@@ -463,7 +463,7 @@ RULES_TEXT = (
     "<b>📖 Bunker — qisqa qoidalar</b>\n\n"
     "Dunyoda falokat yuz berdi. Omon qolishning yagona yo'li — bunker, lekin unda joy hammaga yetmaydi.\n\n"
     "<b>1.</b> Har kimga yashirin xarakter beriladi: kasb, yosh, sog'liq, hobbi, fobiya, xarakter, yuk va qo'shimcha fakt. Shuningdek, bitta maxsus karta.\n\n"
-    "<b>2.</b> Har raundda har kim bitta kartasini ochadi. Birinchi raundda kasb avtomatik ochiladi va yana bittasini o'zingiz tanlaysiz.\n\n"
+    "<b>2.</b> Kartalar navbatma-navbat ochiladi (kim birinchi qo'shilgan bo'lsa, o'sha boshlaydi). 1-raundda hamma kasbini ochadi. Keyingi raundlarda birinchi o'yinchi qaysi turdagi kartani ochsa, qolganlar ham shu turni ochadi. Karta ochilgach, egasi qisqa gapiradi.\n\n"
     "<b>3.</b> Keyin muhokama: nega aynan siz bunkerga kirishingiz kerakligini isbotlang. Yopiq kartalaringiz haqida blef qilish mumkin, ochilganlari haqida yolg'on gapirib bo'lmaydi.\n\n"
     "<b>4.</b> Ovoz berish: eng ko'p ovoz olgan o'yinchi chiqarib yuboriladi. Ovozlar teng bo'lsa — himoya so'zi va qayta ovoz, yana teng bo'lsa — zar 🎲.\n\n"
     "<b>5.</b> Bunkerga 4–10 o'yinchida 2 kishi, 11–14 o'yinchida 3 kishi kiradi.\n\n"
